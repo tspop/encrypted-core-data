@@ -1207,12 +1207,13 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
 }
 
 - (NSDictionary*)relationshipsForEntity: (NSEntityDescription*) entity {
-    NSMutableDictionary *relationships = [[entity relationshipsByName] mutableCopy];
-    
+    NSMutableDictionary *relationships = [NSMutableDictionary dictionary];
+    [relationships addEntriesFromDictionary:[entity relationshipsByName]];
+
     for (NSEntityDescription *subentity in entity.subentities) {
-      [relationships addEntriesFromDictionary:[self relationshipsForEntity:subentity]];
+        [relationships addEntriesFromDictionary:[self relationshipsForEntity:subentity]];
     }
-       
+
     return relationships;
   
 }
