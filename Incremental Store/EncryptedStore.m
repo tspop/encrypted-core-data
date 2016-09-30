@@ -1143,7 +1143,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         }
         
         // change an entity
-        else if (type == NSTransformEntityMappingType) {
+        else if (type == NSTransformEntityMappingType || type == NSCopyEntityMappingType) {
             success &= [self
                         alterTableForSourceEntity:sourceEntity
                         destinationEntity:destinationEntity
