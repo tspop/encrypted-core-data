@@ -3061,9 +3061,14 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         // build result and return
         if (rightOperand && !rightBindings) {
             if([[operator objectForKey:@"operator"] isEqualToString:@"!="]) {
+                // Replace != with IS NOT
                 query = [@[leftOperand, @"IS NOT", rightOperand] componentsJoinedByString:@" "];
-            } else {
+            } else if([[operator objectForKey:@"operator"] isEqualToString:@"="] || [[operator objectForKey:@"operator"] isEqualToString:@"=="]) {
+                // Replace = and == with IS
                 query = [@[leftOperand, @"IS", rightOperand] componentsJoinedByString:@" "];
+            } else {
+                // Otherwise just put in normal operator
+                query = [@[leftOperand, [operator objectForKey:@"operator"], rightOperand] componentsJoinedByString:@" "];
             }
         }
         else {
