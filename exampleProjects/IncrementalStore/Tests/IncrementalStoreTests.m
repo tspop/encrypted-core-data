@@ -206,7 +206,10 @@
     for (NSUInteger i = 0; i < count; i++) {
         id user = [NSEntityDescription insertNewObjectForEntityForName:@"User" inManagedObjectContext:context];
         if(arc4random_uniform(2) == 1) a = 'A';
-        [user setValue:[NSString stringWithFormat:@"%cusername",(char)(arc4random_uniform(26) + a)] forKey:@"name"];
+        NSString *name = [NSString stringWithFormat:@"%cusername",(char)(arc4random_uniform(26) + a)];
+        [user setValue:name forKey:@"name"];
+        [user setValue:@0 forKey:@"age"];
+        [user setValue:@NO forKey:@"admin"];
         [users addObject:user];
     }
     
@@ -222,6 +225,7 @@
     XCTAssertNil(error, @"Could not execute fetch request.");
     XCTAssertEqual(testCount, count, @"The number of users is wrong.");
     
+    return users;
 }
 
 - (void)setUp {
@@ -928,6 +932,47 @@
         }];
 }
 
+- (void)test_aggregateExpressions {
+    NSManagedObject *user = [NSEntityDescription insertNewObjectForEntityForName:@"User" inManagedObjectContext:context];
+
+    // Create tags not assigned to any user
+    NSArray *unusedTagNames = @[@"tag 1", @"Tag 2", @"Täg 3"];
+    for (NSString *tagName in unusedTagNames) {
+        NSManagedObject *tag = [NSEntityDescription insertNewObjectForEntityForName:@"Tag" inManagedObjectContext:context];
+        [tag setValue:tagName forKey:@"name"];
+    }
+
+    // Create tags assigned to user
+    NSArray *usedTagNames = @[@"User Tag 1", @"User Tag 2"];
+    for (NSString *tagName in usedTagNames) {
+        NSManagedObject *tag = [NSEntityDescription insertNewObjectForEntityForName:@"Tag" inManagedObjectContext:context];
+        [tag setValue:tagName forKey:@"name"];
+
+        [tag setValue:[NSSet setWithObject:user] forKey:@"hasUsers"];
+    }
+
+    [context save:nil];
+
+    // Create aggregate expression consisting of (a) constant and (b) key path expressions
+    NSString *constantValue = unusedTagNames[1];
+    NSArray *aggregate = @[[NSExpression expressionForConstantValue:constantValue],
+                           [NSExpression expressionForKeyPath:@"hasUsers.hasTags.name"]];
+
+    NSExpression *aggregateExpression = [NSExpression expressionForAggregate:aggregate];
+
+    // Query tags with names in aggregate expression
+    NSFetchRequest *req = [NSFetchRequest fetchRequestWithEntityName:@"Tag"];
+    req.predicate = [NSPredicate predicateWithFormat:@"name IN %@", aggregateExpression];
+    NSArray *result = [context executeFetchRequest:req error:nil];
+
+    // Compare query result with expected values
+    NSSet *resultSet = [NSSet setWithArray:[result valueForKey:@"name"]];
+    NSSet *expectedSet = [NSSet setWithArray:[[NSMutableArray arrayWithObject:constantValue]
+                                              arrayByAddingObjectsFromArray:usedTagNames]];
+
+    XCTAssertEqualObjects(resultSet, expectedSet);
+}
+
 - (void)test_aggregateFunctions {
     NSArray *data = @[@1, @2, @3, @4, @7];
     
@@ -1002,6 +1047,95 @@
     
     expected = data;
     XCTAssertEqualObjects(query(@"TRUEPREDICATE", nil), [NSSet setWithArray:expected]);
+}
+
+- (void)test_fetchAccountsByManyToManyRelationship {
+    // Create three Account entities with transfer relationships set up this way:
+    //
+    // - account0 can transfer to account1 and account2
+    // - account1 can transfer to account2
+    //
+    // The fetch request is set up to fetch those entities that can send to at least one other Account AND
+    // can receive from at least one other Account.
+
+    NSString *const entityName = @"Account";
+    NSManagedObject *const account0 = [NSEntityDescription insertNewObjectForEntityForName:entityName
+                                                                    inManagedObjectContext:context];
+    NSManagedObject *const account1 = [NSEntityDescription insertNewObjectForEntityForName:entityName
+                                                                    inManagedObjectContext:context];
+    NSManagedObject *const account2 = [NSEntityDescription insertNewObjectForEntityForName:entityName
+                                                                    inManagedObjectContext:context];
+
+    NSString *const accountID0 = @"account0";
+    NSString *const accountID1 = @"account1";
+    NSString *const accountID2 = @"account2";
+    NSString *const idKey = @"accountID";
+    NSString *const transferFromAccountsKey = @"transferFromAccounts";
+    NSString *const transferToAccountsKey = @"transferToAccounts";
+
+    [account0 setValue:accountID0 forKey:idKey];
+    [account1 setValue:accountID1 forKey:idKey];
+    [account2 setValue:accountID2 forKey:idKey];
+
+    NSMutableSet *const transferToAccounts0 = [account0 mutableSetValueForKey:transferToAccountsKey];
+    [transferToAccounts0 addObject:account1];
+    [transferToAccounts0 addObject:account2];
+
+    NSMutableSet *const transferToAccounts1 = [account1 mutableSetValueForKey:transferToAccountsKey];
+    [transferToAccounts1 addObject:account2];
+
+    NSSet *transferFromAccounts;
+    NSSet *transferToAccounts;
+
+    transferFromAccounts = [account0 valueForKey:transferFromAccountsKey];
+    transferToAccounts = [account0 valueForKey:transferToAccountsKey];
+    XCTAssertEqual(transferFromAccounts.count, 0,
+                   @"The %@ entity with ID %@ should have an empty set for %@", entityName, accountID0,
+                   transferFromAccountsKey);
+    XCTAssertEqual(transferToAccounts.count, 2,
+                   @"The %@ entity with ID %@ should be able to send to two %@ entities", entityName,
+                   accountID0, entityName);
+
+    transferFromAccounts = [account1 valueForKey:transferFromAccountsKey];
+    transferToAccounts = [account1 valueForKey:transferToAccountsKey];
+    XCTAssertEqual(transferFromAccounts.count, 1,
+                   @"The %@ entity with ID %@ should be able to receive from one other %@", entityName,
+                   accountID1, entityName);
+    XCTAssertTrue([transferFromAccounts containsObject:account0],
+                  @"The %@ entity with ID %@ should have %@ in its transfer-from set", entityName,
+                  accountID1, accountID0);
+    XCTAssertEqual(transferToAccounts.count, 1,
+                   @"The %@ entity with ID %@ should be able to send to one other %@", entityName,
+                   accountID1, entityName);
+
+    transferFromAccounts = [account2 valueForKey:transferFromAccountsKey];
+    transferToAccounts = [account2 valueForKey:transferToAccountsKey];
+    XCTAssertEqual(transferFromAccounts.count, 2,
+                   @"The %@ entity with ID %@ should be able to receive from two other %@ entities",
+                   entityName, accountID1, entityName);
+    XCTAssertTrue([transferFromAccounts containsObject:account0],
+                  @"The %@ entity with ID %@ should have %@ in its transfer-from set", entityName,
+                  accountID2, accountID0);
+    XCTAssertTrue([transferFromAccounts containsObject:account1],
+                  @"The %@ entity with ID %@ should have %@ in its transfer-from set", entityName,
+                  accountID2, accountID1);
+    XCTAssertEqual(transferToAccounts.count, 0,
+                   @"The %@ entity with ID %@ should have an empty set for %@", entityName, accountID2,
+                   transferToAccountsKey);
+
+    [context save:nil];
+
+    NSFetchRequest *const fetchRequest = [NSFetchRequest fetchRequestWithEntityName:entityName];
+    NSPredicate *const linkageCountPredicate = [NSPredicate predicateWithFormat:@"%K.@count > 0 AND %K.@count > 0",
+                                                transferToAccountsKey, transferFromAccountsKey];
+    fetchRequest.predicate = linkageCountPredicate;
+
+    NSError * __autoreleasing error;
+    NSArray *fetchedAccounts = [context executeFetchRequest:fetchRequest error:&error];
+    XCTAssertNotNil(fetchedAccounts, @"Failed to fetch %@ entities: %@", entityName, error);
+    XCTAssertEqual(fetchedAccounts.count, 1, @"Should have only fetched one %@ (the one with ID %@)",
+                   entityName, accountID1);
+    XCTAssertTrue([fetchedAccounts containsObject:account1], @"Expected %@ to be in %@", account1, fetchedAccounts);
 }
 
 @end
