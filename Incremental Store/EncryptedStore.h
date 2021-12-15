@@ -7,6 +7,12 @@
 
 #import <CoreData/CoreData.h>
 
+@protocol EncryptedCoreDataLogger <NSObject>
+
+-(void) logErrorMessage:(NSString *)message;
+
+@end
+
 typedef struct _options {
     char * passphrase;
     char * database_location;
@@ -98,6 +104,8 @@ typedef NS_ENUM(NSInteger, EncryptedStoreError)
  @return The status of operation.
  */
 - (BOOL)checkDatabasePassphrase:(NSString *)passphrase error:(NSError *__autoreleasing*)error;
+
++ (void)setGlobalLogger:(id<EncryptedCoreDataLogger>)logger;
 
 #pragma mark - Internal
 
