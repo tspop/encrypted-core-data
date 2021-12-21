@@ -847,6 +847,17 @@ static const NSInteger kTableCheckVersion = 1;
     return EncryptedStoreType;
 }
 
+- (NSString *)formatError:(NSError **)error {
+    if (error == nil) {
+        return @"";
+    }
+    NSError *errorObject = *error;
+    if (errorObject == nil) {
+        return @"";
+    }
+    return [NSString stringWithFormat:@"%@ %ld", errorObject.localizedDescription, errorObject.code];
+}
+
 #pragma mark - metadata helpers
 
 - (BOOL)loadMetadata:(NSError **)error {
@@ -926,7 +937,10 @@ static const NSInteger kTableCheckVersion = 1;
 
             // ask if we have a metadata table
             BOOL hasTable = NO;
-            if (![self hasMetadataTable:&hasTable error:error]) { return NO; }
+            if (![self hasMetadataTable:&hasTable error:error]) {
+                [self logErrorMessage:@"hasMetadataTable failed"];
+                return NO;
+            }
             
             // load existing metadata and optionally run migrations
             if (hasTable) {
@@ -1048,6 +1062,7 @@ static const NSInteger kTableCheckVersion = 1;
                 
                 // Create the tables for all entities
                 if (![self initializeDatabase:error]) {
+                    [self logErrorMessage:@"initializeDatabase failed"];
                     return NO;
                 }
                 
@@ -1433,7 +1448,11 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                     inferredMappingModelForSourceModel:fromModel
                                     destinationModel:toModel
                                     error:error];
-    if (mappingModel == nil) { return NO; }
+    if (mappingModel == nil) {
+        NSString *message = [NSString stringWithFormat:@"failed to load NSMappingModel %@ %@ %@", fromModel, toModel, [self formatError:error]];
+        [self logErrorMessage:message];
+        return NO;
+    }
     
     // grab entity snapshots
     NSDictionary *sourceEntities = [fromModel entitiesByName];
@@ -1465,12 +1484,18 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         // add a new entity from final snapshot
         if (type == NSAddEntityMappingType) {
             success &= [self createTableForEntity:destinationEntity error:error];
+            if (!success) {
+                [self logErrorMessage:@"migrateFromModel createTableForEntity failed"];
+            }
             [updatedRootEntities addObject:destinationEntity];
         }
         
         // drop table for deleted entity
         else if (type == NSRemoveEntityMappingType) {
             success &= [self dropTableForEntity:sourceEntity];
+            if (!success) {
+                [self logErrorMessage:@"migrateFromModel dropTableForEntity failed"];
+            }
             [removedRootEntities addObject:sourceEntity];
         }
         
@@ -1486,6 +1511,10 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                                 destinationEntity:destinationEntity
                                                       withMapping:entityMapping
                                                             error:error];
+            }
+            
+            if (!success) {
+                [self logErrorMessage:@"migrateFromModel transform and copy failed"];
             }
             [updatedRootEntities addObject:destinationEntity];
         }
@@ -1519,17 +1548,23 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                              destinationEntity:destinationEntity
                                                    withMapping:nil
                                                          error:error];
+                    
+                    if (!success) {
+                        [self logErrorMessage:@"migrateFromModel NSAddEntityMappingType failed"];
+                    }
                 }
 
                 [destinationEntity.directRelationshipsByName enumerateKeysAndObjectsUsingBlock:^(NSString * _Nonnull key, NSRelationshipDescription * _Nonnull obj, BOOL * _Nonnull relationshipStop) {
                     NSString *tableName = [self tableNameForRelationship:obj];
                     BOOL hasTable;
                     if (![self hasTable:&hasTable withName:tableName error:error]) {
+                        [self logErrorMessage:@"migration hasTable failed"];
                         success = NO;
                         *relationshipStop = YES;
                     }
                     if (!hasTable) {
                         if (![self createTableForRelationship:obj error:error]) {
+                            [self logErrorMessage:@"createTableForRelationship failed"];
                             success = NO;
                             *relationshipStop = YES;
                         }
@@ -1553,6 +1588,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                              destinationEntity:destRootEntity
                                                    withMapping:nil
                                                          error:error];
+                    if (!success) {
+                        [self logErrorMessage:@"migrateFromModel NSRemoveEntityMappingType removeEntity failed"];
+                    }
                 }
 
                 // TODO: should we remove many-to-many relationship tables here?
@@ -1571,6 +1609,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                              destinationEntity:destRootEntity
                                                    withMapping:nil
                                                          error:error];
+                    if (!success) {
+                        [self logErrorMessage:@"alterTableForSourceEntity failed with no mapping"];
+                    }
                 }
 
                 if (success) {
@@ -1578,6 +1619,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                                     destinationEntity:destinationEntity
                                                           withMapping:entityMapping
                                                                 error:error];
+                    if (!success) {
+                        [self logErrorMessage:@"alterTableForSourceEntity failed with mapping"];
+                    }
                 }
             } break;
 
@@ -1732,10 +1776,16 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     sqlite3_stmt *statement = [self preparedStatementForQuery:string];
     sqlite3_step(statement);
     
-    BOOL result = (statement != NULL && sqlite3_finalize(statement) == SQLITE_OK);
+    int finalizeResult = sqlite3_finalize(statement);
+    
+    BOOL result = (statement != NULL && finalizeResult == SQLITE_OK);
     if (!result && error) {
         *error = [self databaseErrorWithMessage:@"createTableForEntity"];
         return result;
+    }
+    if (!result && error == nil) {
+        NSString *message = [NSString stringWithFormat:@"createTableForEntity failed with nil error %d", finalizeResult];
+        [self logErrorMessage:message];
     }
     
     
@@ -1803,7 +1853,12 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                         name];
     sqlite3_stmt *statement = [self preparedStatementForQuery:string];
     sqlite3_step(statement);
-    return (statement != NULL && sqlite3_finalize(statement) == SQLITE_OK);
+    int code = sqlite3_finalize(statement);
+    if (code != SQLITE_OK) {
+        NSString *message = [NSString stringWithFormat:@"dropTableNamed failed %d", code];
+        [self logErrorMessage:message];
+    }
+    return (statement != NULL && code == SQLITE_OK);
 }
 
 - (BOOL)alterTableForSourceEntity:(NSEntityDescription *)sourceEntity
@@ -1821,6 +1876,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     NSString *destinationTableName = [NSString stringWithFormat:@"ecd%@", [rootDestinationEntity name]];
 
     if (![self dropIndicesForEntity:rootDestinationEntity error:error]) {
+        [self logErrorMessage:@"dropIndicesForEntity failed"];
         return NO;
     }
 
@@ -1832,12 +1888,16 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
               temporaryTableName];
     statement = [self preparedStatementForQuery:string];
     sqlite3_step(statement);
-    if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
+    int code = sqlite3_finalize(statement);
+    if (statement == NULL || code != SQLITE_OK) {
+        NSString *message = [NSString stringWithFormat:@"move to tmp table failed %d", code];
+        [self logErrorMessage:message];
         return NO;
     }
 
     // create destination table
     if (![self createTableForEntity:rootDestinationEntity error:error]) {
+        [self logErrorMessage:@"createTableForEntity failed"];
         return NO;
     }
   
@@ -1937,12 +1997,16 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
   
     statement = [self preparedStatementForQuery:string];
     sqlite3_step(statement);
-    if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
+    int sqlResult = sqlite3_finalize(statement);
+    if (statement == NULL || sqlResult != SQLITE_OK) {
+        NSString *message = [NSString stringWithFormat:@"alterTable insert into failed %d", sqlResult];
+        [self logErrorMessage:message];
         return NO;
     }
     
     // delete old table
     if (![self dropTableNamed:temporaryTableName]) {
+        [self logErrorMessage:@"failed to drop temp table"];
         return NO;
     }
     
@@ -2016,9 +2080,12 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                     temporaryTableName];
                 statement = [self preparedStatementForQuery:string];
                 sqlite3_step(statement);
+                int code = sqlite3_finalize(statement);
                 
-                if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK)
+                if (statement == NULL || code != SQLITE_OK)
                 {
+                    NSString *message = [NSString stringWithFormat:@"alterrelationship failed %d", code];
+                    [self logErrorMessage:message];
                     success &= NO;
                     return;
                 }
@@ -2026,6 +2093,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                 //create new table
                 if (![self createTableForRelationship:destinationRelationship error:error])
                 {
+                    [self logErrorMessage:@"createTableForRelationship failed"];
                     success &= NO;
                     return;
                 }
@@ -2054,6 +2122,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                 statement = [self preparedStatementForQuery:string];
                 sqlite3_step(statement);
                 if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
+                    [self logErrorMessage:@"alterRelationship insert failed"];
                     success &= NO;
                     return;
                 }
@@ -2075,6 +2144,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
 
                 if (!tableExists) {
                     success &= [self createTableForRelationship:destinationRelationship error:error];
+                    if (!success) {
+                        [self logErrorMessage:@"createTableForRelationship failed"];
+                    }
                 }
             }
         }
@@ -3041,7 +3113,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     {NSLog(@"SQL DEBUG: %@", query); }
     sqlite3_stmt *statement = NULL;
     if (sqlite3_prepare_v2(database, [query UTF8String], -1, &statement, NULL) == SQLITE_OK) { return statement; }
+    NSString *errorMessage = [NSString stringWithFormat:@"could not prepare statement: %s", sqlite3_errmsg(database)];
     if(debug) {NSLog(@"could not prepare statement: %s\n", sqlite3_errmsg(database));}
+    [self logErrorMessage:errorMessage];
     return NULL;
 }
 
