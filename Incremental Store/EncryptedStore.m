@@ -13,6 +13,8 @@
 
 #import "EncryptedStore.h"
 
+static id<EncryptedCoreDataLogger> logger = nil;
+
 typedef sqlite3_stmt sqlite3_statement;
 
 NSString * const EncryptedStoreType = @"EncryptedStore";
@@ -286,6 +288,7 @@ static const NSInteger kTableCheckVersion = 1;
     {
         NSLog(@"Unable to add persistent store.");
         NSLog(@"Error: %@\n%@\n%@", *error, [*error userInfo], [*error localizedDescription]);
+        [logger logErrorMessage:[NSString stringWithFormat:@"Unable to add persistent store: %@\n%@\n%@", *error, [*error userInfo], [*error localizedDescription]]];
     }
     
     return persistentCoordinator;
@@ -442,7 +445,7 @@ static const NSInteger kTableCheckVersion = 1;
             NSString *table = [self tableNameForEntity:entity];
             NSNumber *value = [self maximumObjectIDInTable:table];
             if (value == nil) {
-                if (error) { *error = [self databaseError]; }
+                if (error) { *error = [self databaseErrorWithMessage:@"obtainPermanentIDsForObjects"]; }
                 *stop = YES;
                 objectIDs = nil;
                 return;
@@ -540,7 +543,7 @@ static const NSInteger kTableCheckVersion = 1;
                 }
             }
             if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-                if (error) { *error = [self databaseError]; }
+                if (error) { *error = [self databaseErrorWithMessage:@"executeRequest"]; }
                 return nil;
             }
         }
@@ -577,7 +580,7 @@ static const NSInteger kTableCheckVersion = 1;
                 [results addObject:singleResult];
             }
             if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-                if (error) { *error = [self databaseError]; }
+                if (error) { *error = [self databaseErrorWithMessage:@"executeRequest NSDictionaryResultType"]; }
                 return nil;
             }
         }
@@ -597,7 +600,7 @@ static const NSInteger kTableCheckVersion = 1;
                 [results addObject:@(count)];
             }
             if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-                if (error) { *error = [self databaseError]; }
+                if (error) { *error = [self databaseErrorWithMessage:@"executeRequest NSCountResultType"]; }
                 return nil;
             }
         }
@@ -715,7 +718,7 @@ static const NSInteger kTableCheckVersion = 1;
         return node;
     }
     else {
-        if (error) { *error = [self databaseError]; }
+        if (error) { *error = [self databaseErrorWithMessage:@"newValuesForObjectWithID"]; }
         sqlite3_finalize(statement);
         return nil;
     }
@@ -817,7 +820,7 @@ static const NSInteger kTableCheckVersion = 1;
     
     // error case
     if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-        if (error) { *error = [self databaseError]; }
+        if (error) { *error = [self databaseErrorWithMessage:@"newValueForRelationship"]; }
         return nil;
     }
     
@@ -867,6 +870,17 @@ static const NSInteger kTableCheckVersion = 1;
     return EncryptedStoreType;
 }
 
+- (NSString *)formatError:(NSError **)error {
+    if (error == nil) {
+        return @"";
+    }
+    NSError *errorObject = *error;
+    if (errorObject == nil) {
+        return @"";
+    }
+    return [NSString stringWithFormat:@"%@ %ld", errorObject.localizedDescription, errorObject.code];
+}
+
 #pragma mark - metadata helpers
 
 - (BOOL)loadMetadata:(NSError **)error {
@@ -879,7 +893,7 @@ static const NSInteger kTableCheckVersion = 1;
             return NO;
         }
         if (![self configureDatabaseCacheSize]) {
-            if (error) { *error = [self databaseError]; }
+            if (error) { *error = [self databaseErrorWithMessage:@"loadMetadata configureDatabaseCacheSize"]; }
             sqlite3_close(database);
             database = NULL;
             return NO;
@@ -892,10 +906,11 @@ static const NSInteger kTableCheckVersion = 1;
             if (sqlite3_exec(database, "VACUUM;", NULL, NULL, &errorMessage) != SQLITE_OK) {
                 if (errorMessage != NULL) {
                     NSLog(@"Failed to invoke SQLite's VACUUM command with error: \"%s\".", errorMessage);
-                    
+                    [self logErrorMessage:@"Failed to run VACCUM"];
                     sqlite3_free(errorMessage);
                 }
                 else {
+                    [self logErrorMessage:@"Failed to run VACCUM"];
                     NSLog(@"Failed to invoke SQLite's VACUUM command.");
                 }
             }
@@ -906,7 +921,14 @@ static const NSInteger kTableCheckVersion = 1;
             
             //make 'LIKE' case-sensitive
             sqlite3_stmt *setPragma = [self preparedStatementForQuery:@"PRAGMA case_sensitive_like = true;"];
-            if (!setPragma || sqlite3_step(setPragma) != SQLITE_DONE || sqlite3_finalize(setPragma) != SQLITE_OK) {
+            int stepCode = sqlite3_step(setPragma);
+            int finalizeCode = 0;
+            if (stepCode == SQLITE_DONE) {
+                finalizeCode = sqlite3_finalize(setPragma);
+            }
+            if (!setPragma || stepCode != SQLITE_DONE || finalizeCode != SQLITE_OK) {
+                NSString *logMessage = [NSString stringWithFormat:@"setPragma failed %d %d", stepCode, finalizeCode];
+                [self logErrorMessage:logMessage];
                 return NO;
             }
             
@@ -938,7 +960,10 @@ static const NSInteger kTableCheckVersion = 1;
 
             // ask if we have a metadata table
             BOOL hasTable = NO;
-            if (![self hasMetadataTable:&hasTable error:error]) { return NO; }
+            if (![self hasMetadataTable:&hasTable error:error]) {
+                [self logErrorMessage:@"hasMetadataTable failed"];
+                return NO;
+            }
             
             // load existing metadata and optionally run migrations
             if (hasTable) {
@@ -954,10 +979,16 @@ static const NSInteger kTableCheckVersion = 1;
                     NSUInteger length = (NSUInteger)sqlite3_column_bytes(statement, 0);
                     NSData *data = [NSData dataWithBytes:bytes length:length];
                     metadata = [NSKeyedUnarchiver unarchiveObjectWithData:data];
+                    if (data == nil) {
+                        [self logErrorMessage:@"loadMetadata nil data"];
+                    }
+                    if (metadata == nil) {
+                        [self logErrorMessage:@"loadMetadata nil metadata"];
+                    }
                     [self setMetadata:metadata];
                 }
                 else {
-                    if (error) { *error = [self databaseError]; }
+                    if (error) { *error = [self databaseErrorWithMessage:@"loadMetadata hasTable"];}
                     sqlite3_finalize(statement);
                     return NO;
                 }
@@ -977,7 +1008,7 @@ static const NSInteger kTableCheckVersion = 1;
                         mutableMetadata[EncryptedStoreMetadataTableCheckVersionKey] = @(kTableCheckVersion);
                         [self setMetadata:mutableMetadata];
                         if (![self saveMetadata]) {
-                            if (error) { *error = [self databaseError]; }
+                            if (error) { *error = [self databaseErrorWithMessage:@"loadMetadata saveMetadata"]; }
                             return NO;
                         }
                     }
@@ -1022,7 +1053,7 @@ static const NSInteger kTableCheckVersion = 1;
                         [mutableMetadata setObject:[newModel entityVersionHashesByName] forKey:NSStoreModelVersionHashesKey];
                         [self setMetadata:mutableMetadata];
                         if (![self saveMetadata]) {
-                            if (error) { *error = [self databaseError]; }
+                            if (error) { *error = [self databaseErrorWithMessage:@"loadMetadata oldModelAndNewModel"]; }
                             return NO;
                         }
                         
@@ -1032,6 +1063,7 @@ static const NSInteger kTableCheckVersion = 1;
                             NSDictionary * userInfo = @{EncryptedStoreErrorMessageKey : @"Missing old model, cannot migrate database"};
                             *error = [NSError errorWithDomain:EncryptedStoreErrorDomain code:EncryptedStoreErrorMigrationFailed userInfo:userInfo];
                         }
+                        [self logErrorMessage:@"Failed to create NSManagedObject models for migration."];
                         return NO;
                     }
                 }
@@ -1047,12 +1079,13 @@ static const NSInteger kTableCheckVersion = 1;
                 sqlite3_stmt *statement = [self preparedStatementForQuery:string];
                 sqlite3_step(statement);
                 if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-                    if (error) { *error = [self databaseError]; }
+                    if (error) { *error = [self databaseErrorWithMessage:@"loadMetadata newStore"]; }
                     return NO;
                 }
                 
                 // Create the tables for all entities
                 if (![self initializeDatabase:error]) {
+                    [self logErrorMessage:@"initializeDatabase failed"];
                     return NO;
                 }
                 
@@ -1063,7 +1096,7 @@ static const NSInteger kTableCheckVersion = 1;
                                            };
                 [self setMetadata:metadata];
                 if (![self saveMetadata]) {
-                    if (error) { *error = [self databaseError]; }
+                    if (error) { *error = [self databaseErrorWithMessage:@"loadMetadata newStore saveMetadata"]; }
                     return NO;
                 }
             }
@@ -1079,7 +1112,7 @@ static const NSInteger kTableCheckVersion = 1;
     }
     
     // load failed
-    if (error && *error == nil) { *error = [self databaseError]; }
+    if (error && *error == nil) { *error = [self databaseErrorWithMessage:@"loadMetadata open failed"]; }
     sqlite3_close(database);
     database = NULL;
     return NO;
@@ -1155,6 +1188,14 @@ static const NSInteger kTableCheckVersion = 1;
     return checked;
 }
 
+- (void)logErrorMessage:(NSString *)message {
+    [logger logErrorMessage:[NSString stringWithFormat:@"🎪: %@", message]];
+}
+
++ (void)setGlobalLogger:(id<EncryptedCoreDataLogger>)globalLogger {
+    logger = globalLogger;
+}
+
 #pragma mark - Internal
 - (BOOL)configureDatabasePassphrase:(NSError *__autoreleasing*)error {
     NSString *passphrase = [[self options] objectForKey:EncryptedStorePassphraseKey];
@@ -1173,11 +1214,15 @@ static const NSInteger kTableCheckVersion = 1;
         if (error) {
             NSMutableDictionary *userInfo = [@{NSLocalizedDescriptionKey : @"Incorrect passcode"} mutableCopy];
             // If we have a DB error keep it for extra info
-            NSError *underlyingError = [self databaseError];
+            NSError *underlyingError = [self databaseErrorWithMessage:@"checkDatabaseStatusWithError"];
             if (underlyingError) {
                 userInfo[NSUnderlyingErrorKey] = underlyingError;
             }
             *error = [NSError errorWithDomain:EncryptedStoreErrorDomain code:EncryptedStoreErrorIncorrectPasscode userInfo:userInfo];
+            NSString *logMessage = [NSString stringWithFormat:@"checkDatabaseStatusWithError failed status: %d", status];
+            [self logErrorMessage:logMessage];
+        } else {
+            [self logErrorMessage:@"checkDatabaseStatusWithError No output error passed"];
         }
     }
     return result && (error == NULL || *error == nil);
@@ -1247,11 +1292,15 @@ static const NSInteger kTableCheckVersion = 1;
             if (error) {
                 NSMutableDictionary *userInfo = [@{NSLocalizedDescriptionKey : @"Could not open database :("} mutableCopy];
                 // If we have a DB error keep it for extra info
-                NSError *underlyingError = [self databaseError];
+                NSError *underlyingError = [self databaseErrorWithMessage:@"validateDatabasePassphrase SQL_OK"];
                 if (underlyingError) {
                     userInfo[NSUnderlyingErrorKey] = underlyingError;
                 }
                 *error = [NSError errorWithDomain:EncryptedStoreErrorDomain code:EncryptedStoreErrorIncorrectPasscode userInfo:userInfo];
+                NSString *logMessage = [NSString stringWithFormat:@"validateDatabasePassphrase failed status: %d", status];
+                [self logErrorMessage:logMessage];
+            } else {
+                [self logErrorMessage:@"validateDatabasePassphrase SQL_OK no out error passed"];
             }
             sqlite3_close(database);
             database = NULL;
@@ -1263,11 +1312,15 @@ static const NSInteger kTableCheckVersion = 1;
         if (error) {
             NSMutableDictionary *userInfo = [@{NSLocalizedDescriptionKey : @"Could not close database :("} mutableCopy];
             // If we have a DB error keep it for extra info
-            NSError *underlyingError = [self databaseError];
+            NSError *underlyingError = [self databaseErrorWithMessage:@"validateDatabasePassphrase"];
             if (underlyingError) {
                 userInfo[NSUnderlyingErrorKey] = underlyingError;
             }
             *error = [NSError errorWithDomain:EncryptedStoreErrorDomain code:EncryptedStoreErrorIncorrectPasscode userInfo:userInfo];
+            NSString *logMessage = [NSString stringWithFormat:@"validateDatabasePassphrase failed status: %d", status];
+            [self logErrorMessage:logMessage];
+        } else {
+            [self logErrorMessage:@"validateDatabasePassphrase no out error passed"];
         }
     }
 
@@ -1292,9 +1345,13 @@ static const NSInteger kTableCheckVersion = 1;
         sqlite3_stmt *statement = [self preparedStatementForQuery:string];
         sqlite3_step(statement);
         
-        if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
+        int result = sqlite3_finalize(statement);
+        
+        if (statement == NULL || result != SQLITE_OK) {
             // TO-DO: handle error with statement
             NSLog(@"Error: statement is NULL or could not be finalized");
+            NSString *logMessage = [NSString stringWithFormat:@"configureDatabaseCacheSize failed with %d", result];
+            [self logErrorMessage:logMessage];
             return NO;
         } else {
             return YES; // follow code is crashing on current sqlcipher version
@@ -1414,7 +1471,11 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                     inferredMappingModelForSourceModel:fromModel
                                     destinationModel:toModel
                                     error:error];
-    if (mappingModel == nil) { return NO; }
+    if (mappingModel == nil) {
+        NSString *message = [NSString stringWithFormat:@"failed to load NSMappingModel %@ %@ %@", fromModel, toModel, [self formatError:error]];
+        [self logErrorMessage:message];
+        return NO;
+    }
     
     // grab entity snapshots
     NSDictionary *sourceEntities = [fromModel entitiesByName];
@@ -1446,12 +1507,18 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         // add a new entity from final snapshot
         if (type == NSAddEntityMappingType) {
             success &= [self createTableForEntity:destinationEntity error:error];
+            if (!success) {
+                [self logErrorMessage:@"migrateFromModel createTableForEntity failed"];
+            }
             [updatedRootEntities addObject:destinationEntity];
         }
         
         // drop table for deleted entity
         else if (type == NSRemoveEntityMappingType) {
             success &= [self dropTableForEntity:sourceEntity];
+            if (!success) {
+                [self logErrorMessage:@"migrateFromModel dropTableForEntity failed"];
+            }
             [removedRootEntities addObject:sourceEntity];
         }
         
@@ -1467,6 +1534,10 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                                 destinationEntity:destinationEntity
                                                       withMapping:entityMapping
                                                             error:error];
+            }
+            
+            if (!success) {
+                [self logErrorMessage:@"migrateFromModel transform and copy failed"];
             }
             [updatedRootEntities addObject:destinationEntity];
         }
@@ -1500,17 +1571,23 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                              destinationEntity:destinationEntity
                                                    withMapping:nil
                                                          error:error];
+                    
+                    if (!success) {
+                        [self logErrorMessage:@"migrateFromModel NSAddEntityMappingType failed"];
+                    }
                 }
 
                 [destinationEntity.directRelationshipsByName enumerateKeysAndObjectsUsingBlock:^(NSString * _Nonnull key, NSRelationshipDescription * _Nonnull obj, BOOL * _Nonnull relationshipStop) {
                     NSString *tableName = [self tableNameForRelationship:obj];
                     BOOL hasTable;
                     if (![self hasTable:&hasTable withName:tableName error:error]) {
+                        [self logErrorMessage:@"migration hasTable failed"];
                         success = NO;
                         *relationshipStop = YES;
                     }
                     if (!hasTable) {
                         if (![self createTableForRelationship:obj error:error]) {
+                            [self logErrorMessage:@"createTableForRelationship failed"];
                             success = NO;
                             *relationshipStop = YES;
                         }
@@ -1534,6 +1611,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                              destinationEntity:destRootEntity
                                                    withMapping:nil
                                                          error:error];
+                    if (!success) {
+                        [self logErrorMessage:@"migrateFromModel NSRemoveEntityMappingType removeEntity failed"];
+                    }
                 }
 
                 // TODO: should we remove many-to-many relationship tables here?
@@ -1552,6 +1632,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                              destinationEntity:destRootEntity
                                                    withMapping:nil
                                                          error:error];
+                    if (!success) {
+                        [self logErrorMessage:@"alterTableForSourceEntity failed with no mapping"];
+                    }
                 }
 
                 if (success) {
@@ -1559,6 +1642,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                                     destinationEntity:destinationEntity
                                                           withMapping:entityMapping
                                                                 error:error];
+                    if (!success) {
+                        [self logErrorMessage:@"alterTableForSourceEntity failed with mapping"];
+                    }
                 }
             } break;
 
@@ -1713,10 +1799,16 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     sqlite3_stmt *statement = [self preparedStatementForQuery:string];
     sqlite3_step(statement);
     
-    BOOL result = (statement != NULL && sqlite3_finalize(statement) == SQLITE_OK);
+    int finalizeResult = sqlite3_finalize(statement);
+    
+    BOOL result = (statement != NULL && finalizeResult == SQLITE_OK);
     if (!result && error) {
-        *error = [self databaseError];
+        *error = [self databaseErrorWithMessage:@"createTableForEntity"];
         return result;
+    }
+    if (!result && error == nil) {
+        NSString *message = [NSString stringWithFormat:@"createTableForEntity failed with nil error %d", finalizeResult];
+        [self logErrorMessage:message];
     }
     
     
@@ -1742,7 +1834,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         sqlite3_step(statement);
         BOOL result = (statement != NULL && sqlite3_finalize(statement) == SQLITE_OK);
         if (!result && error) {
-            *error = [self databaseError];
+            *error = [self databaseErrorWithMessage:@"createIndicesForEntity"];
             return result;
         }
     }
@@ -1766,7 +1858,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         sqlite3_step(statement);
         BOOL result = (statement != NULL && sqlite3_finalize(statement) == SQLITE_OK);
         if (!result && error) {
-            *error = [self databaseError];
+            *error = [self databaseErrorWithMessage:@"dropIndicesForEntity"];
             return result;
         }
     }
@@ -1784,7 +1876,12 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                         name];
     sqlite3_stmt *statement = [self preparedStatementForQuery:string];
     sqlite3_step(statement);
-    return (statement != NULL && sqlite3_finalize(statement) == SQLITE_OK);
+    int code = sqlite3_finalize(statement);
+    if (code != SQLITE_OK) {
+        NSString *message = [NSString stringWithFormat:@"dropTableNamed failed %d", code];
+        [self logErrorMessage:message];
+    }
+    return (statement != NULL && code == SQLITE_OK);
 }
 
 - (BOOL)alterTableForSourceEntity:(NSEntityDescription *)sourceEntity
@@ -1802,6 +1899,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     NSString *destinationTableName = [NSString stringWithFormat:@"ecd%@", [rootDestinationEntity name]];
 
     if (![self dropIndicesForEntity:rootDestinationEntity error:error]) {
+        [self logErrorMessage:@"dropIndicesForEntity failed"];
         return NO;
     }
 
@@ -1813,12 +1911,16 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
               temporaryTableName];
     statement = [self preparedStatementForQuery:string];
     sqlite3_step(statement);
-    if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
+    int code = sqlite3_finalize(statement);
+    if (statement == NULL || code != SQLITE_OK) {
+        NSString *message = [NSString stringWithFormat:@"move to tmp table failed %d", code];
+        [self logErrorMessage:message];
         return NO;
     }
 
     // create destination table
     if (![self createTableForEntity:rootDestinationEntity error:error]) {
+        [self logErrorMessage:@"createTableForEntity failed"];
         return NO;
     }
   
@@ -1918,12 +2020,16 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
   
     statement = [self preparedStatementForQuery:string];
     sqlite3_step(statement);
-    if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
+    int sqlResult = sqlite3_finalize(statement);
+    if (statement == NULL || sqlResult != SQLITE_OK) {
+        NSString *message = [NSString stringWithFormat:@"alterTable insert into failed %d", sqlResult];
+        [self logErrorMessage:message];
         return NO;
     }
     
     // delete old table
     if (![self dropTableNamed:temporaryTableName]) {
+        [self logErrorMessage:@"failed to drop temp table"];
         return NO;
     }
     
@@ -1951,7 +2057,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     
     BOOL result = (statement != NULL && sqlite3_finalize(statement) == SQLITE_OK);
     if (!result) {
-        *error = [self databaseError];
+        *error = [self databaseErrorWithMessage:@"createTableForRelationship"];
         return result;
     }
     return YES;
@@ -1997,9 +2103,12 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                                     temporaryTableName];
                 statement = [self preparedStatementForQuery:string];
                 sqlite3_step(statement);
+                int code = sqlite3_finalize(statement);
                 
-                if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK)
+                if (statement == NULL || code != SQLITE_OK)
                 {
+                    NSString *message = [NSString stringWithFormat:@"alterrelationship failed %d", code];
+                    [self logErrorMessage:message];
                     success &= NO;
                     return;
                 }
@@ -2007,6 +2116,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                 //create new table
                 if (![self createTableForRelationship:destinationRelationship error:error])
                 {
+                    [self logErrorMessage:@"createTableForRelationship failed"];
                     success &= NO;
                     return;
                 }
@@ -2035,6 +2145,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                 statement = [self preparedStatementForQuery:string];
                 sqlite3_step(statement);
                 if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
+                    [self logErrorMessage:@"alterRelationship insert failed"];
                     success &= NO;
                     return;
                 }
@@ -2056,6 +2167,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
 
                 if (!tableExists) {
                     success &= [self createTableForRelationship:destinationRelationship error:error];
+                    if (!success) {
+                        [self logErrorMessage:@"createTableForRelationship failed"];
+                    }
                 }
             }
         }
@@ -2084,7 +2198,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         [mNameSet addObject:[NSString stringWithCString:(char*)name encoding:NSUTF8StringEncoding]];
     }
     if (tiPragma == NULL || sqlite3_finalize(tiPragma) != SQLITE_OK) {
-        if (error) *error = [self databaseError];
+        if (error) *error = [self databaseErrorWithMessage:@"getTableColumnNames"];
         return NO;
     }
 
@@ -2243,6 +2357,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
             *error = [NSError errorWithDomain:EncryptedStoreErrorDomain
                                          code:EncryptedStoreErrorMigrationFailed
                                      userInfo:@{EncryptedStoreErrorMessageKey:@"Missing old model, cannot check database"}];
+            [self logErrorMessage:@"Missing old model, cannot check database"];
         }
         return NO;
     }
@@ -2330,7 +2445,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         sqlite3_step(statement);
 
         if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-            if (error) *error = [self databaseError];
+            if (error) *error = [self databaseErrorWithMessage:@"checkTableForEntity"];
             success = NO;
             *stop = YES;
             return;
@@ -2385,7 +2500,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         sqlite3_step(statement);
 
         if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-            if (error) *error = [self databaseError];
+            if (error) *error = [self databaseErrorWithMessage:@"checkTableForRelationship"];
             success = NO;
             *stop = YES;
             return;
@@ -2410,7 +2525,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         nodeCache = localNodeCache;
         return [NSArray array];
     }
-    if (error) { *error = [self databaseError]; }
+    if (error) { *error = [self databaseErrorWithMessage:@"handleSaveChangesRequest"]; }
     return nil;
 }
 
@@ -2541,7 +2656,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         
         // finish up
         if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-            if (error != NULL) { *error = [self databaseError]; }
+            if (error != NULL) { *error = [self databaseErrorWithMessage:@"handleInsertedObjectsInSaveRequest"]; }
             *stop = YES;
             success = NO;
         }
@@ -2701,7 +2816,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
 #endif
         }
         else {
-            if (error != NULL) { *error = [self databaseError]; }
+            if (error != NULL) { *error = [self databaseErrorWithMessage:@"handleUpdatedObjectsInSaveRequest"]; }
             *stop = YES;
             success = NO;
         }
@@ -2761,7 +2876,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
             int finalize = sqlite3_finalize(statement);
             if (finalize != SQLITE_OK && finalize != SQLITE_CONSTRAINT) {
                 if (error != nil) {
-                    *error = [self databaseError];
+                    *error = [self databaseErrorWithMessage:@"handleUpdatedRelationInSaveRequest"];
                 }
                 success = NO;
             } else {
@@ -2794,7 +2909,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
             int finalize = sqlite3_finalize(statement);
             if (finalize != SQLITE_OK && finalize != SQLITE_CONSTRAINT) {
                 if (error != nil) {
-                    *error = [self databaseError];
+                    *error = [self databaseErrorWithMessage:@"handleUpdatedRelationInSaveRequest no rows"];
                 }
                 success = NO;
             } else {
@@ -2828,7 +2943,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     sqlite3_step(statement);
     
     if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-        if (error != nil) { *error = [self databaseError]; }
+        if (error != nil) { *error = [self databaseErrorWithMessage:@"handleUpdatedRelationInSaveRequest NULL statement"]; }
         success = NO;
         }
     }
@@ -2854,7 +2969,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
         
         // finish up
         if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-            if (error != NULL) { *error = [self databaseError]; }
+            if (error != NULL) { *error = [self databaseErrorWithMessage:@"handleDeletedObjectsInSaveRequest"]; }
             *stop = YES;
             success = NO;
         } else if (![self handleDeletedRelationInSaveRequest:object error:error]) {
@@ -2890,7 +3005,7 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
                 sqlite3_step(statement);
                 
                 if (statement == NULL || sqlite3_finalize(statement) != SQLITE_OK) {
-                    if (error != NULL) { *error = [self databaseError]; }
+                    if (error != NULL) { *error = [self databaseErrorWithMessage:@"handleDeletedRelationInSaveRequest"]; }
                     *stop = YES;
                     success = NO;
                 }
@@ -2939,11 +3054,12 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     int count = 0;
     NSString *string = [NSString stringWithFormat:kSQL, name];
     sqlite3_stmt *statement = [self preparedStatementForQuery:string];
-    if (statement != NULL && sqlite3_step(statement) == SQLITE_ROW) {
+    int result = sqlite3_step(statement);
+    if (statement != NULL && result == SQLITE_ROW) {
         count = sqlite3_column_int(statement, 0);
     }
     else {
-        if (error) { *error = [self databaseError]; }
+        if (error) { *error = [self databaseErrorWithMessage:[NSString stringWithFormat:@"hasTable result: %d", result]]; }
         sqlite3_finalize(statement);
         return NO;
     }
@@ -2952,17 +3068,21 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     return YES;
 }
 
-- (NSError *)databaseError {
+- (NSError *)databaseErrorWithMessage:(NSString *)message {
     int code = sqlite3_errcode(database);
+    NSString *logError = [NSString stringWithFormat:@"EncryptedStore failed %@ %d", message, code];
     if (code) {
+        NSString *sqlErrorMessage = [NSString stringWithUTF8String:sqlite3_errmsg(database)];
         NSDictionary *userInfo = @{
-                                   EncryptedStoreErrorMessageKey : [NSString stringWithUTF8String:sqlite3_errmsg(database)]
+                                   EncryptedStoreErrorMessageKey : sqlErrorMessage
                                    };
+        logError = [logError stringByAppendingString:sqlErrorMessage];
         return [NSError
                 errorWithDomain:NSSQLiteErrorDomain
                 code:code
                 userInfo:userInfo];
     }
+    [self logErrorMessage:logError];
     return nil;
 }
 
@@ -3016,7 +3136,9 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     {NSLog(@"SQL DEBUG: %@", query); }
     sqlite3_stmt *statement = NULL;
     if (sqlite3_prepare_v2(database, [query UTF8String], -1, &statement, NULL) == SQLITE_OK) { return statement; }
+    NSString *errorMessage = [NSString stringWithFormat:@"could not prepare statement: %s", sqlite3_errmsg(database)];
     if(debug) {NSLog(@"could not prepare statement: %s\n", sqlite3_errmsg(database));}
+    [self logErrorMessage:errorMessage];
     return NULL;
 }
 
