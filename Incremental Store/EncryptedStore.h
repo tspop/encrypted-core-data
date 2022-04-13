@@ -204,6 +204,15 @@ typedef NS_ENUM(NSInteger, EncryptedStoreError)
  */
 - (BOOL)changeDatabasePassphrase:(NSString *)oldPassphrase toNewPassphrase:(NSString *)newPassphrase error:(NSError *__autoreleasing*)error;
 
+- (void)close;
+- (NSString *)integrityStatus;
+
+- (NSString *)columnsClauseWithProperties:(NSArray *)properties;
+- (void *)preparedStatementForQuery:(NSString *)query;
+- (id)valueForProperty:(NSPropertyDescription *)property
+           inStatement:(void *)theStatement
+               atIndex:(int)index
+            withEntity:(NSEntityDescription *)theEntity;
 
 @end
 

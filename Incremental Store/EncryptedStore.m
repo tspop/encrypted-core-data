@@ -407,6 +407,29 @@ static const NSInteger kTableCheckVersion = 1;
     database = NULL;
 }
 
+- (void)close {
+    sqlite3_close(database);
+    database = NULL;
+}
+
+- (NSString *)integrityStatus {
+    sqlite3_stmt *integrityPragma = [self preparedStatementForQuery:@"PRAGMA integrity_check;"];
+    
+    NSMutableString *finalResult = [NSMutableString string];
+    
+    while (sqlite3_step(integrityPragma) == SQLITE_ROW) {
+        char *rawResult = (char *)sqlite3_column_text(integrityPragma, 0);
+        NSString *result = [NSString stringWithCString:rawResult encoding:NSUTF8StringEncoding];
+        [finalResult appendString:result];
+    }
+    
+    if (integrityPragma != NULL) {
+        sqlite3_finalize(integrityPragma);
+    }
+    
+    return finalResult;
+}
+
 -(NSArray *)storeEntities
 {
     return [[self.persistentStoreCoordinator managedObjectModel] entitiesForConfiguration:[self configurationName]];
@@ -1018,7 +1041,7 @@ static const NSInteger kTableCheckVersion = 1;
                             if (error != nil) {
                                 NSError *errorValue = *error;
                                 if (errorValue != nil) {
-                                    message = [message stringByAppendingFormat:@"%@ %ld", errorValue.localizedDescription, errorValue.code];
+                                    message = [message stringByAppendingFormat:@"%@ %@ %ld", errorValue.localizedDescription, errorValue.userInfo, errorValue.code];
                                 }
                             }
                             [self logErrorMessage:message];
