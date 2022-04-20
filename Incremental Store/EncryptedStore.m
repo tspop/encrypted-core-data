@@ -3622,6 +3622,10 @@ static void dbsqliteStripCaseDiacritics(sqlite3_context *context, int argc, cons
     return nil;
 }
 
+- (void *)getDatabase {
+    return database;
+}
+
 -(id)expressionDescriptionTypeValue:(NSExpressionDescription *)expressionDescription
                 withReferenceNumber:(NSNumber *)number
                          withEntity:(NSEntityDescription *)entity {

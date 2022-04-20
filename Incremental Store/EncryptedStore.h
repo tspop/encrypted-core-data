@@ -206,13 +206,7 @@ typedef NS_ENUM(NSInteger, EncryptedStoreError)
 
 - (void)close;
 - (NSString *)integrityStatus;
-
-- (NSString *)columnsClauseWithProperties:(NSArray *)properties;
-- (void *)preparedStatementForQuery:(NSString *)query;
-- (id)valueForProperty:(NSPropertyDescription *)property
-           inStatement:(void *)theStatement
-               atIndex:(int)index
-            withEntity:(NSEntityDescription *)theEntity;
+- (void *)getDatabase;
 
 @end
 
